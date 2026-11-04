@@ -1,0 +1,113 @@
+name: querysheriff-system-tests
+
+x-backend-env: &backend-env
+  POSTGRES_URL: postgres://querysheriff_backend:querysheriff_backend@postgres:5432/querysheriff?sslmode=disable
+  CLICKHOUSE_URL: clickhouse://querysheriff_backend:querysheriff_backend@clickhouse:9000/querysheriff
+
+services:
+  monitored-postgres:
+    image: postgres:17
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - logging_collector=on
+      - -c
+      - log_destination=jsonlog
+      - -c
+      - log_min_duration_statement=1000
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./monitored-postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - monitored-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP, so it fails while the entrypoint's socket-only init server runs.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U postgres']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  collector:
+    image: ${COLLECTOR_IMAGE:-ghcr.io/querysheriff/collector:0.0.11}
+    # querysheriff images are published for amd64 only, so arm64 hosts run them emulated.
+    platform: linux/amd64
+    # The postgres uid, as when deployed as a sidecar, so it can read the jsonlogs.
+    user: '999:999'
+    # Started by the onboarding test once it has created the token in .run/collector.yml.
+    profiles: [collector]
+    depends_on:
+      monitored-postgres:
+        condition: service_healthy
+    volumes:
+      - ./.run/collector.yml:/etc/querysheriff-collector.yml:ro
+      - monitored-pgdata:/var/lib/postgresql/data:ro
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: querysheriff_backend
+      POSTGRES_PASSWORD: querysheriff_backend
+      POSTGRES_DB: querysheriff
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U querysheriff_backend -d querysheriff']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse:25.12
+    environment:
+      CLICKHOUSE_DB: querysheriff
+      CLICKHOUSE_USER: querysheriff_backend
+      CLICKHOUSE_PASSWORD: querysheriff_backend
+    healthcheck:
+      test: ['CMD-SHELL', "clickhouse-client --user querysheriff_backend --password querysheriff_backend -q 'SELECT 1'"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  migrate:
+    image: ${BACKEND_IMAGE:-ghcr.io/querysheriff/backend:0.0.26}
+    platform: linux/amd64
+    entrypoint: ['/querysheriff-migrate']
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/querysheriff/backend:0.0.26}
+    platform: linux/amd64
+    environment:
+      <<: *backend-env
+      LISTEN_ADDR: 0.0.0.0:3000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/querysheriff/frontend:0.0.21}
+    platform: linux/amd64
+
+  # Serves the dashboard and /api on one origin, as in production.
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - '18080:8080'
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://backend:3000/readyz && wget -q --spider http://frontend:3000/']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  monitored-pgdata:

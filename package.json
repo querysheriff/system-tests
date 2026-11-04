@@ -1,0 +1,18 @@
+{
+	"name": "querysheriff-system-tests",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=24"
+	},
+	"scripts": {
+		"test": "playwright test",
+		"check": "tsc && prettier --check ."
+	},
+	"devDependencies": {
+		"@playwright/test": "1.64.1",
+		"@types/node": "^24",
+		"prettier": "^3.9.0",
+		"typescript": "^6.0.3"
+	}
+}
